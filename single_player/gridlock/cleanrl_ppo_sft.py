@@ -20,19 +20,19 @@ from torch.utils.data import TensorDataset, DataLoader
 import gymnasium as gym
 
 # Import your env
-from gym_env_final import GridlockEnv
+from gridlock.cleanrl_gym_env import GridlockEnv
 
 # --- Hyperparameters ---
-EXP_NAME = "SimpleGridlock_PPO_SFT"
+EXP_NAME = "Gridlock_PPO_SFT"
 SEED = 1
 TORCH_DETERMINISTIC = True
 CUDA = True
 
 # Training Config
-TOTAL_TIMESTEPS = 500000
+TOTAL_TIMESTEPS = 5000000
 LEARNING_RATE = 2.5e-4
-NUM_ENVS = 4
-NUM_STEPS = 128
+NUM_ENVS = 8
+NUM_STEPS = 256
 GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_COEF = 0.2
@@ -52,7 +52,7 @@ SFT_LEARNING_RATE = 3e-4  # Lower than PPO LR to prevent instability
 
 # Evaluation Config
 EVAL_INTERVAL = 10
-PATIENCE = 10
+PATIENCE = 50
 
 # Network Config
 HIDDEN_SIZE = 128

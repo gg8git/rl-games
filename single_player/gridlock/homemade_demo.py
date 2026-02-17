@@ -16,7 +16,7 @@ from collections import namedtuple
 import time
 
 # Import from training script
-from ppo_sft_final import (
+from gridlock.homemade_ppo_sft import (
     PPOPolicy, State, Square, validate_action, no_valid_moves, 
     score, sample_draw_batch, device
 )

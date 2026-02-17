@@ -11,8 +11,12 @@ gridlock:
 
 ## homemade training loop
 
-`ppo_sft_final.py` and `demo.py` are a homemade rollout of sft+ppo on this task
+`homemade_ppo_sft.py` and `homemade_demo.py` are a homemade rollout of sft+ppo on this task
 
 ## cleanrl training loop
 
-`ppo_sft_cleanrl_final.py` and `demo_cleanrl.py` are a cleanrl library supported rollout of sft+ppo on this task
+`cleanrl_ppo_sft.py`, `cleanrl_gym_env.py`, and `env_demo.py` are a cleanrl library supported rollout of sft+ppo on this task
+
+## cleanrl training loop
+
+`sb3_ppo_sft.py`, `sb3_gym_env.py`, and `env_demo.py` are a cleanrl library supported rollout of sft+ppo on this task

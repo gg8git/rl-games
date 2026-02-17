@@ -1,7 +1,18 @@
 utils
+requirements.txt
+multi_player/deprecated
 
 # gridlock
-gridlock/__pycache__
-gridlock/ckpt
-gridlock/deprecated
-gridlock/runs
+single_player/gridlock/__pycache__
+single_player/gridlock/ckpt
+single_player/gridlock/deprecated
+single_player/gridlock/runs
+
+multi_player/deprecated
+multi_player/gong_zhu
+
+multi_player/connect_four/LightZero
+multi_player/connect_four/connect4*
+multi_player/connect_four/muzero.py
+multi_player/connect_four/muzero_ppo.py
+multi_player/connect_four/muzero_c4_v2.py

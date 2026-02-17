@@ -18,7 +18,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
-from ppo_sft_cleanrl_final import Agent, make_env
+from gridlock.cleanrl_ppo_sft import Agent, make_env
 import gymnasium as gym
 
 
