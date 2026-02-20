@@ -17,11 +17,12 @@ from lzero.mcts import GumbelMuZeroGameBuffer
 from lzero.policy import visit_count_temperature
 from lzero.policy.random_policy import LightZeroRandomPolicy
 from lzero.worker import MuZeroCollector as Collector
-from lzero.worker import MuZeroEvaluator as Evaluator
+# from lzero.worker import MuZeroEvaluator as Evaluator
 from tensorboardX import SummaryWriter
 
-from gridlock.config import get_gridlock_config
+from gridlock_testing.config import get_gridlock_config
 from config import get_gridlock2_config
+from evaluator import GridlockMuZeroEvaluator as Evaluator
 
 def train_gumbel_muzero(
         input_cfg: Tuple[dict, dict],

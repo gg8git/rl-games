@@ -284,6 +284,7 @@ class Gridlock2Env(BaseEnv):
             
             if timestep.done:
                 timestep.obs['to_play'] = -1
+                timestep = self._add_score_info(timestep)
                 return timestep
                 
             # 2. Bot(s) take turns until it's the training agent's turn again
@@ -293,7 +294,9 @@ class Gridlock2Env(BaseEnv):
                 timestep = self._player_step(bot_action)
                 
             timestep.obs['to_play'] = -1
-            return timestep
+            if timestep.done:
+                timestep = self._add_score_info(timestep)
+            return timestep # add info about scores for reference
             
         else:
             raise NotImplementedError(f"Battle mode {self.battle_mode} not supported.")
@@ -409,6 +412,14 @@ class Gridlock2Env(BaseEnv):
         max_score = max(scores)
         winners = [i for i, s in enumerate(scores) if s == max_score]
         return winners
+    
+    def _add_score_info(self, timestep: BaseEnvTimestep) -> BaseEnvTimestep:
+        scores = [self._score_grid(g) for g in self.grids]
+        timestep.info['p1_score'] = scores[0]
+        timestep.info['max_score'] = max(scores)
+        timestep.info['avg_score'] = sum(scores) / len(scores)
+        # print('add score info', scores[0], max(scores), sum(scores) / len(scores))
+        return timestep
     
     @property
     def _current_player(self):

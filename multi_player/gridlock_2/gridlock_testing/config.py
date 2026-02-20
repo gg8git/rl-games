@@ -77,7 +77,7 @@ main_config = gridlock_gumbel_muzero_config
 gridlock_gumbel_muzero_create_config = dict(
     env=dict(
         type='gridlock',
-        import_names=['gridlock.env'],
+        import_names=['gridlock_testing.env'],
     ),
     env_manager=dict(type='subprocess'),
     policy=dict(
