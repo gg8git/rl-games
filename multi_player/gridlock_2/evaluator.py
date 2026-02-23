@@ -255,6 +255,12 @@ class GridlockMuZeroEvaluator(ISerialEvaluator):
             action_mask_dict = {i: to_ndarray(init_obs[i]['action_mask']) for i in range(env_nums)}
             to_play_dict = {i: to_ndarray(init_obs[i]['to_play']) for i in range(env_nums)}
 
+            # EDITED: ADDED CHANCE DICT [START]
+            chance_dict = {}
+            if getattr(self.policy_config, 'use_ture_chance_label_in_chance_encoder', False):
+                chance_dict = {i: to_ndarray(init_obs[i].get('chance', 0)) for i in range(env_nums)}
+            # ADDED CHANCE DICT [END]
+
             timestep_dict = {}
             for i in range(env_nums):
                 if 'timestep' not in init_obs[i]:
@@ -352,15 +358,21 @@ class GridlockMuZeroEvaluator(ISerialEvaluator):
                         if self._policy.get_attribute('cfg').type in ['unizero', 'sampled_unizero']:
                             self._policy.reset(env_id=env_id, current_steps=eps_steps_lst[env_id], reset_init_data=False, task_id=self.task_id)
 
-                        game_segments[env_id].append(
-                            actions[env_id], to_ndarray(obs['observation']), reward, action_mask_dict[env_id],
-                            to_play_dict[env_id], timestep_dict[env_id]
-                        )
+                        # EDITED: DYNAMICALLY ADDED CHANCE DICT TO GAME SEGMENTS [START]
+                        append_args = (actions[env_id], to_ndarray(obs['observation']), reward, action_mask_dict[env_id], to_play_dict[env_id])
+                        append_args += (timestep_dict[env_id],)
+                        if getattr(self.policy_config, 'use_ture_chance_label_in_chance_encoder', False):
+                            append_args += (chance_dict[env_id],)
+                        game_segments[env_id].append(*append_args)
 
                         # IMPORTANT: The action_mask and to_play from the new observation correspond to the *next* state.
                         action_mask_dict[env_id] = to_ndarray(obs['action_mask'])
                         to_play_dict[env_id] = to_ndarray(obs['to_play'])
                         timestep_dict[env_id] = to_ndarray(obs.get('timestep', -1))
+                        
+                        if getattr(self.policy_config, 'use_ture_chance_label_in_chance_encoder', False):
+                            chance_dict[env_id] = to_ndarray(obs.get('chance', 0))
+                        # DYNAMICALLY ADDED CHANCE DICT TO GAME SEGMENTS [END]
 
                         dones[env_id] = done
                         if episode_timestep.done:
@@ -368,7 +380,7 @@ class GridlockMuZeroEvaluator(ISerialEvaluator):
                             reward = episode_timestep.info['eval_episode_return']
                             saved_info = {'eval_episode_return': episode_timestep.info['eval_episode_return']}
 
-                            # ADDED LOGGING METRICS [START]
+                            # EDITED: ADDED LOGGING METRICS [START]
                             if 'p1_score' in episode_timestep.info:
                                 saved_info['p1_score'] = episode_timestep.info['p1_score']
                             if 'max_score' in episode_timestep.info:

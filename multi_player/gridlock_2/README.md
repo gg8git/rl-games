@@ -6,3 +6,10 @@
 - each player stops once 9 cards have been played or the next card cannot be placed anywhere in the grid (remaining players continue in the same order)
 - each player's score is the sum of each completed column, row, and diagonal
 - highest score wins, 2 or more people tying is a draw
+
+
+## adjustments
+
+- sparse -> dense reward (rather than -1, 0, 1), make clipped (margin / 30)
+- allow for some random + expert play during self-play training -> prevents getting caught in bad policy
+- stochastic muzero instead of gumbel muzero or muzero to build chance prediction into the model

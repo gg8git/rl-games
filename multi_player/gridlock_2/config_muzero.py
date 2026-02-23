@@ -4,49 +4,50 @@ from easydict import EasyDict
 # ==============================================================
 # begin of the most frequently changed config specified by the user
 # ==============================================================
-env_id = 'gridlock'
+env_id = 'gridlock2'
 action_space_size = 9
 collector_env_num = 16
 n_episode = 16
 evaluator_env_num = 10
-num_simulations = 100
+num_simulations = 150
 update_per_collect = 200
 batch_size = 512
-max_env_step = int(1e6)
+max_env_step = int(1e7)
 reanalyze_ratio = 0.
 # ==============================================================
 # end of the most frequently changed config specified by the user
 # ==============================================================
 
-gridlock_muzero_config = dict(
-    exp_name=f'data_varied_muzero/gridlock_stochastic_muzero_ns{num_simulations}_upc{update_per_collect}_rer{reanalyze_ratio}_bs{batch_size}_seed0',
+gridlock2_gumbel_muzero_config = dict(
+    exp_name=f'data_varied_muzero/gridlock2_muzero_ns{num_simulations}_upc{update_per_collect}_rer{reanalyze_ratio}_bs{batch_size}_seed0',
     env=dict(
         env_id=env_id,
-        obs_shape=(2,3,3),
+        num_players=2,
+        battle_mode='self_play_mode',
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
         manager=dict(shared_memory=False, ),
+        # prob_random_agent=0.07,
+        # prob_expert_agent=0.13,
     ),
     policy=dict(
         model=dict(
-            observation_shape=(2,3,3),
+            observation_shape=(3,3,3),
             action_space_size=action_space_size,
-            image_channel=2,
-            num_res_blocks=1,
-            num_channels=16,
-            reward_head_hidden_channels=[8],
-            value_head_hidden_channels=[8],
-            policy_head_hidden_channels=[8],
+            image_channel=3,
+            num_res_blocks=3,
+            num_channels=64,
+            reward_head_hidden_channels=[32],
+            value_head_hidden_channels=[32],
+            policy_head_hidden_channels=[32],
             # NOTE: whether to use the self_supervised_learning_loss. default is False
             # self_supervised_learning_loss=True,
         ),
-        # (str) The path of the pretrained model. If None, the model will be initialized by the default model.
-        model_path=None,
         cuda=True,
         env_type='board_games',
         action_type='varied_action_space',
-        game_segment_length=9,
+        game_segment_length=18,
         update_per_collect=update_per_collect,
         batch_size=batch_size,
         optim_type='Adam',
@@ -71,13 +72,13 @@ gridlock_muzero_config = dict(
         evaluator_env_num=evaluator_env_num,
     ),
 )
-gridlock_muzero_config = EasyDict(gridlock_muzero_config)
-main_config = gridlock_muzero_config
+gridlock2_gumbel_muzero_config = EasyDict(gridlock2_gumbel_muzero_config)
+main_config = gridlock2_gumbel_muzero_config
 
-gridlock_muzero_create_config = dict(
+gridlock2_gumbel_muzero_create_config = dict(
     env=dict(
-        type='gridlock',
-        import_names=['gridlock_testing.env'],
+        type='gridlock2',
+        import_names=['env_eval'],
     ),
     env_manager=dict(type='subprocess'),
     policy=dict(
@@ -85,8 +86,8 @@ gridlock_muzero_create_config = dict(
         import_names=['lzero.policy.muzero'],
     ),
 )
-gridlock_muzero_create_config = EasyDict(gridlock_muzero_create_config)
-create_config = gridlock_muzero_create_config
+gridlock2_gumbel_muzero_create_config = EasyDict(gridlock2_gumbel_muzero_create_config)
+create_config = gridlock2_gumbel_muzero_create_config
 
-def get_gridlock_config():
+def get_gridlock2_config():
     return main_config, create_config

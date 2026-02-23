@@ -63,7 +63,7 @@ class GridlockEnv(BaseEnv):
         # Observation space formatted for MuZero CNNs: (2, 3, 3)
         # Channel 0: Board state
         # Channel 1: Current card to play (broadcasted)
-        if self.need_flatten
+        if self.need_flatten:
             self._observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(10,), dtype=np.float32)
         else:
             self._observation_space = gym.spaces.Box(low=0.0, high=1.0, shape=(2, 3, 3), dtype=np.float32)
@@ -130,7 +130,7 @@ class GridlockEnv(BaseEnv):
 
     def observe(self) -> dict:
         # Build MuZero spatial observation
-        if need_flatten:
+        if self.need_flatten:
             grid_obs = self.grid.flatten().astype(np.float32)
             card_obs = self.deck[self.pointer] if self.pointer < 40 else 0
             observation = np.append(grid_obs, card_obs)
@@ -147,18 +147,23 @@ class GridlockEnv(BaseEnv):
         
         # scale observations
         if self.scale_obs:
-                grid_obs /= 10.0
-                card_obs /= 10.0
+            observation /= 10.0
 
         # Build action mask
         action_mask = np.zeros(self.total_num_actions, dtype=np.int8)
         for act in self.legal_actions:
             action_mask[act] = 1
 
+        if self.pointer < 40:
+            chance = int(self.deck[self.pointer] - 1)
+        else:
+            chance = 0
+
         return {
             'observation': observation,
             'action_mask': action_mask,
-            'to_play': -1  # -1 indicates a single-player environment to MCTS
+            'to_play': -1,  # -1 indicates a single-player environment to MCTS
+            'chance': chance
         }
 
     @property

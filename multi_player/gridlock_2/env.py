@@ -117,6 +117,9 @@ class Gridlock2Env(BaseEnv):
         max_episode_steps=9,
         is_collect=True,
         need_flatten=False, # no support
+        prob_random_agent=0.0,
+        prob_expert_agent=0.0,
+        reward_mode="dense_scaled",
     )
 
     @classmethod
@@ -136,11 +139,17 @@ class Gridlock2Env(BaseEnv):
         # The mode of MCTS is only used in AlphaZero.
         self.battle_mode_in_simulation_env = 'self_play_mode'
 
+        self.reward_mode = self._cfg.reward_mode
+        assert self.reward_mode in ['dense_raw', 'dense_scaled', 'sparse']
+
         self.scale_obs = self._cfg.scale_obs
         self.channel_last = self._cfg.channel_last
         self.max_episode_steps = self._cfg.max_episode_steps
         self.is_collect = self._cfg.is_collect
         self.need_flatten = self._cfg.need_flatten
+
+        self.prob_random_agent = self._cfg.prob_random_agent
+        self.prob_expert_agent = self._cfg.prob_expert_agent
 
         self._env = self
         self.num_players = self._cfg.num_players
@@ -156,7 +165,7 @@ class Gridlock2Env(BaseEnv):
         self.current_player_index = 0 # Required for LightZero compatibility
 
         # bot play
-        if self.battle_mode == 'eval_mode':
+        if self.battle_mode in ['eval_mode', 'play_with_bot_mode'] or self.prob_expert_agent > 0:
             self.device = torch.device("cpu") # for subprocess safety
             self.bot = load_bot('./ppo_bot_policy.pt', self.device)
         else:
@@ -233,6 +242,15 @@ class Gridlock2Env(BaseEnv):
                 
             break  # Valid turn found
 
+    def compute_reward(self, margin: int) -> float:
+        if self.reward_mode == "dense_raw":
+            return float(margin) # raw reward
+        elif self.reward_mode == "dense_scaled":
+            return float(np.clip(margin / 30.0, -1.0, 1.0)) # dense scaled and clipped
+        elif self.reward_mode == "sparse":
+            return 1.0 if margin > 0 else (-1.0 if margin < 0 else 0.0) # sparse
+        return 0.0
+
     def _player_step(self, action: int) -> BaseEnvTimestep:
         acting_player = self.current_player_index
 
@@ -256,29 +274,35 @@ class Gridlock2Env(BaseEnv):
         
         if done:
             # Reward assignment for the player who *just* moved
-            if winner == self.players[acting_player]:
-                reward = 1.0
-            elif winner == -1:
-                reward = 0.0
-            else:
-                reward = -1.0
+            acting_score, max_opp, winners = self.get_score_winners(acting_player)
+            margin = acting_score - max_opp
+            reward = self.compute_reward(margin)
                 
             # LightZero evaluates the episode return primarily from Player 1's perspective
-            winners = self.get_winners() 
-            if 0 in winners and len(winners) == 1:
-                info['eval_episode_return'] = 1.0
-            elif 0 in winners:
-                info['eval_episode_return'] = 0.0
+            if self.battle_mode == 'self_play_mode':
+                p0_score, p0_max_opp, _ = self.get_score_winners(0)
+                p0_margin = p0_score - p0_max_opp
+                info['eval_episode_return'] = self.compute_reward(p0_margin)
             else:
-                info['eval_episode_return'] = -1.0
-                
+                # SPARSE: Strictly prints Human Win/Loss/Draw against the PPO bot during evaluation
+                if 0 in winners and len(winners) == 1:
+                    info['eval_episode_return'] = 1.0
+                elif 0 in winners:
+                    info['eval_episode_return'] = 0.0
+                else:
+                    info['eval_episode_return'] = -1.0
+            
         return BaseEnvTimestep(self.observe(), np.array(reward, dtype=np.float32), done, info)
 
     def step(self, action: int) -> BaseEnvTimestep:
         if self.battle_mode == 'self_play_mode':
+            if self.prob_random_agent > 0 and np.random.rand() < self.prob_random_agent:
+                action = self.random_action()
+            elif self.prob_expert_agent > 0 and np.random.rand() < self.prob_expert_agent:
+                action = self.bot_action()
             return self._player_step(action)
             
-        elif self.battle_mode == 'eval_mode':
+        elif self.battle_mode in ['eval_mode', 'play_with_bot_mode']:
             # 1. Training Agent takes a step
             timestep = self._player_step(action)
             
@@ -328,11 +352,23 @@ class Gridlock2Env(BaseEnv):
         for act in self.legal_actions:
             action_mask[act] = 1
 
+        if self.pointer < 40:
+            chance = int(self.deck[self.pointer] - 1)
+        else:
+            chance = 0
+        
+        assert 0 <= chance <= 9, f"FATAL: Chance {chance} is out of bounds [0, 9]!"
+
         return {
             'observation': self.current_state()[1],
             'action_mask': action_mask,
-            'to_play': self._current_player if self.battle_mode == 'self_play_mode' else -1
+            'to_play': self._current_player if self.battle_mode == 'self_play_mode' else -1,
+            'chance': chance
         }
+
+    def random_action(self) -> int:
+        action_list = self.legal_actions
+        return int(np.random.choice(action_list))
     
     def bot_action(self):
         grid_obs = self.current_state()[1][0] if self.scale_obs else (self.current_state()[1][0] / 10.0)
@@ -400,18 +436,23 @@ class Gridlock2Env(BaseEnv):
 
     def get_done_winner(self) -> Tuple[bool, int]:
         if self.pointer >= 40 or not any(self.active_players) or len(self.turn_sequence) == 0:
-            winners = self.get_winners()
+            _, _, winners = self.get_score_winners()
             if len(winners) == 1:
                 return True, self.players[winners[0]]
             else:
                 return True, -1 # Draw
         return False, -1
     
-    def get_winners(self) -> List[int]:
+    def get_score_winners(self, acting_player: int = None) -> List[int]: # replace in other places
         scores = [self._score_grid(g) for g in self.grids]
         max_score = max(scores)
         winners = [i for i, s in enumerate(scores) if s == max_score]
-        return winners
+
+        if acting_player is not None:
+            opp_scores = [s for i, s in enumerate(scores) if i != acting_player]
+            return scores[acting_player], max(opp_scores), winners
+        
+        return max_score, None, winners
     
     def _add_score_info(self, timestep: BaseEnvTimestep) -> BaseEnvTimestep:
         scores = [self._score_grid(g) for g in self.grids]

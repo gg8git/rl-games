@@ -13,7 +13,7 @@ from ding.worker import BaseLearner
 from ditk import logging
 from lzero.entry.utils import log_buffer_memory_usage, log_buffer_run_time
 from lzero.entry.utils import calculate_update_per_collect, random_collect
-from lzero.mcts import GumbelMuZeroGameBuffer
+from lzero.mcts import MuZeroGameBuffer
 from lzero.policy import visit_count_temperature
 from lzero.policy.random_policy import LightZeroRandomPolicy
 from lzero.worker import MuZeroCollector as Collector
@@ -24,7 +24,7 @@ from gridlock_testing.config_muzero import get_gridlock_config
 from config_muzero import get_gridlock2_config
 from evaluator import GridlockMuZeroEvaluator as Evaluator
 
-def train_gumbel_muzero(
+def train_muzero(
         input_cfg: Tuple[dict, dict],
         seed: int = 0,
         model: Optional[torch.nn.Module] = None,
@@ -50,8 +50,8 @@ def train_gumbel_muzero(
     """
 
     cfg, create_cfg = input_cfg
-    assert create_cfg.policy.type in ['gumbel_muzero'], \
-        "train_gumbel_muzero requires gumbel_muzero policy."
+    assert create_cfg.policy.type in ['muzero'], \
+        "train_muzero requires muzero policy."
 
     if cfg.policy.cuda and torch.cuda.is_available():
         cfg.policy.device = 'cuda'
@@ -81,7 +81,7 @@ def train_gumbel_muzero(
     policy_config = cfg.policy
     batch_size = policy_config.batch_size
     # specific game buffer for MCTS+RL algorithms
-    replay_buffer = GumbelMuZeroGameBuffer(policy_config) # UNDERSTAND
+    replay_buffer = MuZeroGameBuffer(policy_config) # UNDERSTAND
     collector = Collector(
         env=collector_env,
         policy=policy.collect_mode,
@@ -198,4 +198,4 @@ def train_gumbel_muzero(
 
 if __name__ == "__main__":
     main_config, create_config = get_gridlock2_config()
-    train_gumbel_muzero([main_config, create_config], seed=0, max_env_step=int(2e5))
+    train_muzero([main_config, create_config], seed=0, max_env_step=int(2e5))

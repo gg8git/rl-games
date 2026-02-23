@@ -2,6 +2,7 @@ import os
 from functools import partial
 from typing import Optional, Tuple
 
+import numpy as np
 import torch
 import wandb
 from ding.config import compile_config
@@ -13,18 +14,19 @@ from ding.worker import BaseLearner
 from ditk import logging
 from lzero.entry.utils import log_buffer_memory_usage, log_buffer_run_time
 from lzero.entry.utils import calculate_update_per_collect, random_collect
-from lzero.mcts import GumbelMuZeroGameBuffer
+from lzero.mcts import StochasticMuZeroGameBuffer
 from lzero.policy import visit_count_temperature
 from lzero.policy.random_policy import LightZeroRandomPolicy
-from lzero.worker import MuZeroCollector as Collector
+# from lzero.worker import MuZeroCollector as Collector
 # from lzero.worker import MuZeroEvaluator as Evaluator
 from tensorboardX import SummaryWriter
 
-from gridlock_testing.config_muzero import get_gridlock_config
-from config_muzero import get_gridlock2_config
+from gridlock_testing.config_stochastic import get_gridlock_stochastic_config
+from config_stochastic import get_gridlock2_stochastic_config
 from evaluator import GridlockMuZeroEvaluator as Evaluator
+from collector import GridlockMuZeroCollector as Collector
 
-def train_gumbel_muzero(
+def train_stochastic_muzero(
         input_cfg: Tuple[dict, dict],
         seed: int = 0,
         model: Optional[torch.nn.Module] = None,
@@ -50,8 +52,8 @@ def train_gumbel_muzero(
     """
 
     cfg, create_cfg = input_cfg
-    assert create_cfg.policy.type in ['gumbel_muzero'], \
-        "train_gumbel_muzero requires gumbel_muzero policy."
+    assert create_cfg.policy.type in ['stochastic_muzero'], \
+        "train_stochastic_muzero requires stochastic_muzero policy."
 
     if cfg.policy.cuda and torch.cuda.is_available():
         cfg.policy.device = 'cuda'
@@ -81,7 +83,7 @@ def train_gumbel_muzero(
     policy_config = cfg.policy
     batch_size = policy_config.batch_size
     # specific game buffer for MCTS+RL algorithms
-    replay_buffer = GumbelMuZeroGameBuffer(policy_config) # UNDERSTAND
+    replay_buffer = StochasticMuZeroGameBuffer(policy_config) # UNDERSTAND
     collector = Collector(
         env=collector_env,
         policy=policy.collect_mode,
@@ -181,6 +183,21 @@ def train_gumbel_muzero(
                     f'continue to collect now ....'
                 )
                 break
+            
+            if cfg.policy.get('use_ture_chance_label_in_chance_encoder', False):
+                current_batch, target_batch = train_data
+                
+                # Unpack the correctly ordered tuple
+                obs, act, mask, idx, weights, make_time, chance = current_batch
+                
+                # THE FIX: The buffer pads empty terminal states with -1.
+                # PyTorch one_hot crashes if it sees -1, so we clamp it to 0.
+                assert np.max(chance) <= 9, f"chance max too big"
+                assert 0 <= np.min(chance), f"chance min too small: {np.min(chance)}\n{chance}"
+                
+                # Repack the tuple
+                current_batch = (obs, act, mask, idx, weights, make_time, chance)
+                train_data = (current_batch, target_batch)
 
             # The core train steps for MCTS+RL algorithms.
             log_vars = learner.train(train_data, collector.envstep)
@@ -197,5 +214,5 @@ def train_gumbel_muzero(
     return policy
 
 if __name__ == "__main__":
-    main_config, create_config = get_gridlock2_config()
-    train_gumbel_muzero([main_config, create_config], seed=0, max_env_step=int(2e5))
+    main_config, create_config = get_gridlock_stochastic_config()
+    train_stochastic_muzero([main_config, create_config], seed=0, max_env_step=int(2e5))

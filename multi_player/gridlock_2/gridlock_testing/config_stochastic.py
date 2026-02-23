@@ -4,26 +4,27 @@ from easydict import EasyDict
 # ==============================================================
 # begin of the most frequently changed config specified by the user
 # ==============================================================
-env_id = 'gridlock2'
+env_id = 'gridlock'
 action_space_size = 9
-collector_env_num = 8
-n_episode = 8
-evaluator_env_num = 5
-num_simulations = 50
-update_per_collect = 100
-batch_size = 256
-max_env_step = int(5e5)
+chance_space_size = 10
+use_ture_chance_label_in_chance_encoder = True
+collector_env_num = 16
+n_episode = 16
+evaluator_env_num = 10
+num_simulations = 100
+update_per_collect = 200
+batch_size = 512
+max_env_step = int(1e6)
 reanalyze_ratio = 0.
 # ==============================================================
 # end of the most frequently changed config specified by the user
 # ==============================================================
 
-gridlock2_gumbel_muzero_config = dict(
-    exp_name=f'data_muzero/gridlock2_gumbel_muzero_ns{num_simulations}_upc{update_per_collect}_rer{reanalyze_ratio}_bs{batch_size}_seed0',
+gridlock_muzero_config = dict(
+    exp_name=f'data_varied_muzero/gridlock_stochastic_muzero_ns{num_simulations}_upc{update_per_collect}_rer{reanalyze_ratio}_bs{batch_size}_seed0',
     env=dict(
         env_id=env_id,
-        num_players=2,
-        battle_mode='self_play_mode',
+        obs_shape=(2,3,3),
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
@@ -31,23 +32,23 @@ gridlock2_gumbel_muzero_config = dict(
     ),
     policy=dict(
         model=dict(
-            observation_shape=(3,3,3),
+            observation_shape=(2,3,3),
             action_space_size=action_space_size,
-            image_channel=3,
+            chance_space_size=chance_space_size,
+            image_channel=2,
             num_res_blocks=1,
             num_channels=16,
             reward_head_hidden_channels=[8],
             value_head_hidden_channels=[8],
             policy_head_hidden_channels=[8],
             # NOTE: whether to use the self_supervised_learning_loss. default is False
-            # self_supervised_learning_loss=True,
+            self_supervised_learning_loss=True,
         ),
-        # (str) The path of the pretrained model. If None, the model will be initialized by the default model.
-        model_path=None,
+        use_ture_chance_label_in_chance_encoder=use_ture_chance_label_in_chance_encoder,
         cuda=True,
         env_type='board_games',
         action_type='varied_action_space',
-        game_segment_length=18,
+        game_segment_length=9,
         update_per_collect=update_per_collect,
         batch_size=batch_size,
         optim_type='Adam',
@@ -64,7 +65,7 @@ gridlock2_gumbel_muzero_config = dict(
         # threshold_training_steps_for_final_temperature=int(1e5),
         # (float) Weight decay for training policy network.
         # weight_decay=1e-4,
-        # ssl_loss_weight=2,  # default is 0
+        ssl_loss_weight=2,  # default is 0
         n_episode=n_episode,
         eval_freq=int(2e3),
         replay_buffer_size=int(1e6),  # the size/capacity of replay_buffer, in the terms of transitions.
@@ -72,22 +73,22 @@ gridlock2_gumbel_muzero_config = dict(
         evaluator_env_num=evaluator_env_num,
     ),
 )
-gridlock2_gumbel_muzero_config = EasyDict(gridlock2_gumbel_muzero_config)
-main_config = gridlock2_gumbel_muzero_config
+gridlock_muzero_config = EasyDict(gridlock_muzero_config)
+main_config = gridlock_muzero_config
 
-gridlock2_gumbel_muzero_create_config = dict(
+gridlock_muzero_create_config = dict(
     env=dict(
-        type='gridlock2',
-        import_names=['env_eval'],
+        type='gridlock',
+        import_names=['gridlock_testing.env'],
     ),
     env_manager=dict(type='subprocess'),
     policy=dict(
-        type='gumbel_muzero',
-        import_names=['lzero.policy.gumbel_muzero'],
+        type='stochastic_muzero',
+        import_names=['lzero.policy.stochastic_muzero'],
     ),
 )
-gridlock2_gumbel_muzero_create_config = EasyDict(gridlock2_gumbel_muzero_create_config)
-create_config = gridlock2_gumbel_muzero_create_config
+gridlock_muzero_create_config = EasyDict(gridlock_muzero_create_config)
+create_config = gridlock_muzero_create_config
 
-def get_gridlock2_config():
+def get_gridlock_stochastic_config():
     return main_config, create_config
