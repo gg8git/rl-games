@@ -1,0 +1,504 @@
+import copy
+from typing import List, Tuple
+
+import gymnasium as gym
+import numpy as np
+from ding.envs import BaseEnv, BaseEnvTimestep
+from ding.utils import ENV_REGISTRY
+from easydict import EasyDict
+
+
+# ============================================================
+# Pre-trained Bot Architecture
+# ============================================================
+import torch
+import torch.nn as nn
+from torch.distributions.categorical import Categorical
+
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+class Gridlock2PPOBot(nn.Module):
+    def __init__(self, obs_size, action_size, hidden_size=128):
+        super().__init__()
+        
+        # CRITIC
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(obs_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, 1), std=1.0),
+        )
+        # ACTOR
+        self.actor = nn.Sequential(
+            layer_init(nn.Linear(obs_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, hidden_size)),
+            nn.Tanh(),
+            layer_init(nn.Linear(hidden_size, action_size), std=0.01),
+        )
+
+    def get_value(self, x):
+        return self.critic(x)
+
+    def get_action_and_value(self, x, action=None, action_mask=None):
+        logits = self.actor(x)
+        
+        # NaN check before masking (defensive programming)
+        if torch.isnan(logits).any():
+            print(f"WARNING: NaN detected in actor logits before masking!")
+            print(f"Input x stats: min={x.min():.4f}, max={x.max():.4f}, mean={x.mean():.4f}")
+            print(f"NaN count: {torch.isnan(logits).sum().item()}/{logits.numel()}")
+            # Replace NaN with 0 as emergency fallback
+            logits = torch.where(torch.isnan(logits), torch.zeros_like(logits), logits)
+        
+        # --- Invalid Action Masking ---
+        if action_mask is not None:
+            # Ensure mask is boolean
+            action_mask = action_mask.bool()
+            
+            # Check for deadlocked environments (no valid actions)
+            # This is a normal game condition - some card orderings lead to early termination
+            is_row_empty = ~action_mask.any(dim=1)
+            
+            if is_row_empty.any():
+                # For deadlocked envs, unmask everything
+                # Agent will sample any action, environment will terminate with final score
+                # This is simpler than conditional masking and works correctly
+                action_mask[is_row_empty] = True
+            
+            # Apply mask: valid actions keep their logits, invalid get -1e8
+            logits = torch.where(
+                action_mask, 
+                logits, 
+                torch.tensor(-1e8, device=logits.device, dtype=logits.dtype)
+            )
+        
+        # NaN check after masking (catch any issues from masking operation)
+        if torch.isnan(logits).any():
+            print(f"WARNING: NaN detected in actor logits after masking!")
+            logits = torch.where(torch.isnan(logits), torch.tensor(-1e8, device=logits.device, dtype=logits.dtype), logits)
+
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+
+def load_bot(path, device):
+    bot = Gridlock2PPOBot(10, 9).to(device)
+    bot.load_state_dict(torch.load(path, map_location=device))
+    bot.eval()
+    return bot
+
+# ============================================================
+# Environment
+# ============================================================
+@ENV_REGISTRY.register('gridlock2')
+class Gridlock2Env(BaseEnv):
+    """
+    Overview:
+        The Gridlock2Env is a LightZero compatible environment for the 2-3 player 
+        turn-based game Gridlock2. Players draft cards in a snake order and try 
+        to build the highest scoring 3x3 grid.
+    """
+
+    config = dict(
+        env_id="gridlock2",
+        # Supports 2 or 3 players
+        num_players=2, 
+        non_zero_sum=False,
+        battle_mode='self_play_mode',
+        battle_mode_in_simulation_env='self_play_mode',
+        scale_obs=True,
+        channel_last=False,
+        max_episode_steps=9,
+        is_collect=True,
+        need_flatten=False, # no support
+        prob_random_agent=0.0,
+        prob_expert_agent=0.0,
+        reward_mode="dense_scaled",
+    )
+
+    @classmethod
+    def default_config(cls: type) -> EasyDict:
+        cfg = EasyDict(copy.deepcopy(cls.config))
+        cfg.cfg_type = cls.__name__ + 'Dict'
+        return cfg
+
+    def __init__(self, cfg: dict = None) -> None:
+        default_config = self.default_config()
+        default_config.update(cfg)
+        self._cfg = default_config
+
+        self.battle_mode = self._cfg.battle_mode
+        # The mode of interaction between the agent and the environment.
+        assert self.battle_mode in ['self_play_mode', 'play_with_bot_mode', 'eval_mode']
+        # The mode of MCTS is only used in AlphaZero.
+        self.battle_mode_in_simulation_env = 'self_play_mode'
+
+        self.reward_mode = self._cfg.reward_mode
+        assert self.reward_mode in ['dense_raw', 'dense_scaled', 'sparse']
+
+        self.scale_obs = self._cfg.scale_obs
+        self.channel_last = self._cfg.channel_last
+        self.max_episode_steps = self._cfg.max_episode_steps
+        self.is_collect = self._cfg.is_collect
+        self.need_flatten = self._cfg.need_flatten
+
+        self.prob_random_agent = self._cfg.prob_random_agent
+        self.prob_expert_agent = self._cfg.prob_expert_agent
+
+        self._env = self
+        self.num_players = self._cfg.num_players
+        assert self.num_players in [2, 3], "Gridlock2 strictly supports 2 or 3 players."
+        self.board_size = 3
+        self.total_num_actions = self.board_size * self.board_size
+        self.players = list(range(1, self.num_players + 1))
+
+        # Internal state
+        self.deck = None
+        self.grids = None
+        self.pointer = 0
+        self.current_player_index = 0 # Required for LightZero compatibility
+
+        # bot play
+        if self.battle_mode in ['eval_mode', 'play_with_bot_mode'] or self.prob_expert_agent > 0:
+            self.device = torch.device("cpu") # for subprocess safety
+            self.bot = load_bot('./ppo_bot_policy.pt', self.device)
+        else:
+            self.bot = None
+        
+        # RL Spaces
+        self._action_space = gym.spaces.Discrete(self.total_num_actions)
+        
+        # Observation space formatted for MuZero CNNs: (num_players + 1, 3, 3)
+        # Ch 0: Current Player Grid
+        # Ch 1 to N-1: Opponent Grids
+        # Ch N: Current card to play (broadcasted)
+        high = 1.0 if self.scale_obs else 10.0
+        if self.need_flatten:
+            self._observation_space = gym.spaces.Box(low=0.0, high=high, shape=(self.num_players,10), dtype=np.float32)
+        else:
+            self._observation_space = gym.spaces.Box(low=0.0, high=high, shape=(self.num_players + 1, 3, 3), dtype=np.float32)
+        self._reward_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(1,), dtype=np.float32)
+
+    def reset(self, start_player_index: int = 0, init_state=None) -> dict:
+        self.pointer = 0
+        
+        # Shared 40-card Deck
+        self.deck = np.tile(np.arange(1, 11), 4)
+        np.random.shuffle(self.deck)
+        
+        if init_state is not None:
+            self.grids = [np.array(copy.deepcopy(init_state[i]), dtype=np.int32) for i in range(self.num_players)]
+        else:
+            self.grids = [np.zeros((self.board_size, self.board_size), dtype=np.int32) for _ in range(self.num_players)]
+        self.cards_played = [0] * self.num_players
+        self.active_players = [True] * self.num_players
+
+        # Generate a baseline Snake draft sequence up to 40 cards
+        self.turn_sequence = []
+        for r in range((40 // self.num_players) + 3):
+            if r % 2 == 0:
+                self.turn_sequence.extend(list(range(self.num_players)))
+            else:
+                self.turn_sequence.extend(list(reversed(range(self.num_players))))
+                
+        # Required to maintain LZ compatibility
+        self.start_player_index = start_player_index
+        self.current_player_index = self.start_player_index
+        while self.turn_sequence[0] != self.start_player_index:
+            self.turn_sequence.pop(0)
+
+        # Fast-forward to the first valid turn
+        self._advance_turn()
+        return self.observe()
+
+    def _advance_turn(self):
+        """
+        Pops from the turn sequence until it finds an active player with legal moves.
+        If a player has no legal moves for the drawn card, they are eliminated and the card is burned.
+        """
+        while self.pointer < 40 and any(self.active_players) and self.turn_sequence:
+            p = self.turn_sequence[0]
+            
+            # Skip if they're already inactive or their grid is full
+            if not self.active_players[p] or self.cards_played[p] >= 9:
+                self.active_players[p] = False
+                self.turn_sequence.pop(0)
+                continue
+                
+            self.current_player_index = p
+            
+            # If no legal actions, player is eliminated and the card is discarded
+            if len(self.legal_actions) == 0:
+                self.active_players[p] = False
+                self.turn_sequence.pop(0)
+                self.pointer += 1
+                continue
+                
+            break  # Valid turn found
+
+    def compute_reward(self, margin: int) -> float:
+        if self.reward_mode == "dense_raw":
+            return float(margin) # raw reward
+        elif self.reward_mode == "dense_scaled":
+            return float(np.clip(margin / 30.0, -1.0, 1.0)) # dense scaled and clipped
+        elif self.reward_mode == "sparse":
+            return 1.0 if margin > 0 else (-1.0 if margin < 0 else 0.0) # sparse
+        return 0.0
+
+    def _player_step(self, action: int) -> BaseEnvTimestep:
+        acting_player = self.current_player_index
+
+        # Execute valid move or penalize with random action
+        row, col = action // 3, action % 3
+        if action in self.legal_actions:
+            self.grids[acting_player][row, col] = self.deck[self.pointer]
+            self.cards_played[acting_player] += 1
+        else:
+            self.active_players[acting_player] = False
+            
+        self.turn_sequence.pop(0)
+        self.pointer += 1
+        
+        # Proceed to the next player's turn
+        self._advance_turn()
+        
+        done, winner = self.get_done_winner()
+        reward = 0.0
+        info = {}
+        
+        if done:
+            # Reward assignment for the player who *just* moved
+            acting_score, max_opp, winners = self.get_score_winners(acting_player)
+            margin = acting_score - max_opp
+            reward = self.compute_reward(margin)
+                
+            # LightZero evaluates the episode return primarily from Player 1's perspective
+            if self.battle_mode == 'self_play_mode':
+                p0_score, p0_max_opp, _ = self.get_score_winners(0)
+                p0_margin = p0_score - p0_max_opp
+                info['eval_episode_return'] = self.compute_reward(p0_margin)
+            else:
+                # SPARSE: Strictly prints Human Win/Loss/Draw against the PPO bot during evaluation
+                if 0 in winners and len(winners) == 1:
+                    info['eval_episode_return'] = 1.0
+                elif 0 in winners:
+                    info['eval_episode_return'] = 0.0
+                else:
+                    info['eval_episode_return'] = -1.0
+            
+        return BaseEnvTimestep(self.observe(), np.array(reward, dtype=np.float32), done, info)
+
+    def step(self, action: int) -> BaseEnvTimestep:
+        if self.battle_mode == 'self_play_mode':
+            if self.prob_random_agent > 0 and np.random.rand() < self.prob_random_agent:
+                action = self.random_action()
+            elif self.prob_expert_agent > 0 and np.random.rand() < self.prob_expert_agent:
+                action = self.bot_action()
+            return self._player_step(action)
+            
+        elif self.battle_mode in ['eval_mode', 'play_with_bot_mode']:
+            # 1. Training Agent takes a step
+            timestep = self._player_step(action)
+            
+            if timestep.done:
+                timestep.obs['to_play'] = -1
+                timestep = self._add_score_info(timestep)
+                return timestep
+                
+            # 2. Bot(s) take turns until it's the training agent's turn again
+            # This handles snake draft where a bot might take multiple turns in a row
+            while not timestep.done and self.current_player_index != 0:
+                bot_action = self.bot_action()
+                timestep = self._player_step(bot_action)
+                
+            timestep.obs['to_play'] = -1
+            if timestep.done:
+                timestep = self._add_score_info(timestep)
+            return timestep # add info about scores for reference
+            
+        else:
+            raise NotImplementedError(f"Battle mode {self.battle_mode} not supported.")
+
+    def current_state(self) -> Tuple[np.ndarray, np.ndarray]:
+        # Sort grids relative to the current player's perspective
+        grids_obs = [self.grids[self.current_player_index].astype(np.float32)]
+        for i in range(1, self.num_players):
+            opp_idx = (self.current_player_index + i) % self.num_players
+            grids_obs.append(self.grids[opp_idx].astype(np.float32))
+            
+        # Append the broadcasted card (or zeros if the game is over)
+        if self.pointer < 40 and any(self.active_players) and len(self.turn_sequence) > 0:
+            current_card = self.deck[self.pointer]
+            card_obs = np.full((3, 3), current_card, dtype=np.float32)
+        else:
+            card_obs = np.zeros((3, 3), dtype=np.float32)
+            
+        raw_obs = np.stack(grids_obs + [card_obs], axis=0)
+        scale_obs = raw_obs / 10.0 if self.scale_obs else raw_obs
+        
+        if self.channel_last:
+            return np.transpose(raw_obs, [1, 2, 0]), np.transpose(scale_obs, [1, 2, 0])
+        else:
+            return raw_obs, scale_obs
+
+    def observe(self) -> dict:
+        action_mask = np.zeros(self.total_num_actions, dtype=np.int8)
+        for act in self.legal_actions:
+            action_mask[act] = 1
+
+        if self.pointer < 40:
+            chance = int(self.deck[self.pointer] - 1)
+        else:
+            chance = 0
+        
+        assert 0 <= chance <= 9, f"FATAL: Chance {chance} is out of bounds [0, 9]!"
+
+        return {
+            'observation': self.current_state()[1],
+            'action_mask': action_mask,
+            'to_play': self._current_player if self.battle_mode == 'self_play_mode' else -1,
+            'chance': chance
+        }
+
+    def random_action(self) -> int:
+        action_list = self.legal_actions
+        return int(np.random.choice(action_list))
+    
+    def bot_action(self):
+        grid_obs = self.current_state()[1][0] if self.scale_obs else (self.current_state()[1][0] / 10.0)
+        card_obs = self.deck[self.pointer] / 10.0
+        bot_obs = np.append(grid_obs.flatten(), card_obs).astype(np.float32)
+
+        bot_mask = np.zeros(self.total_num_actions, dtype=bool)
+        for act in self.legal_actions: bot_mask[act] = True
+        
+        with torch.no_grad():
+            obs_t = torch.tensor(bot_obs, dtype=torch.float32).unsqueeze(0).to(self.device)
+            mask_t = torch.tensor(bot_mask).unsqueeze(0).to(self.device)
+
+            logits = self.bot.actor(obs_t)
+            masked_logits = torch.where(mask_t, logits, torch.tensor(float("-inf")).to(self.device))
+            action = masked_logits.argmax(dim=-1)
+
+        return action.item()
+
+
+    @property
+    def legal_actions(self) -> List[int]:
+        if self.pointer >= 40:
+            return []
+            
+        card = self.deck[self.pointer]
+        grid = self.grids[self.current_player_index]
+        valid_actions = []
+        for a in range(self.total_num_actions):
+            if self._validate_action(a, card, grid):
+                valid_actions.append(a)
+        return valid_actions
+
+    def _validate_action(self, action: int, card: int, grid: np.ndarray) -> bool:
+        row, col = action // 3, action % 3
+        
+        if grid[row, col] != 0:
+            return False
+            
+        # Left (must be < current)
+        if col - 1 >= 0 and grid[row, col - 1] != 0 and grid[row, col - 1] >= card: 
+            return False
+        # Right (must be > current)
+        if col + 1 < 3 and grid[row, col + 1] != 0 and grid[row, col + 1] <= card: 
+            return False
+        # Up (must be > current)
+        if row - 1 >= 0 and grid[row - 1, col] != 0 and grid[row - 1, col] <= card: 
+            return False
+        # Down (must be < current)
+        if row + 1 < 3 and grid[row + 1, col] != 0 and grid[row + 1, col] >= card: 
+            return False
+                
+        return True
+
+    def _score_grid(self, grid: np.ndarray) -> float:
+        total = 0.0
+        for i in range(3):
+            if (grid[:, i] != 0).all(): total += grid[:, i].sum()
+            if (grid[i, :] != 0).all(): total += grid[i, :].sum()
+                
+        if (np.diag(grid) != 0).all(): total += np.diag(grid).sum()
+        if (np.diag(np.fliplr(grid)) != 0).all(): total += np.diag(np.fliplr(grid)).sum()
+            
+        return float(total)
+
+    def get_done_winner(self) -> Tuple[bool, int]:
+        if self.pointer >= 40 or not any(self.active_players) or len(self.turn_sequence) == 0:
+            _, _, winners = self.get_score_winners()
+            if len(winners) == 1:
+                return True, self.players[winners[0]]
+            else:
+                return True, -1 # Draw
+        return False, -1
+    
+    def get_score_winners(self, acting_player: int = None) -> List[int]: # replace in other places
+        scores = [self._score_grid(g) for g in self.grids]
+        max_score = max(scores)
+        winners = [i for i, s in enumerate(scores) if s == max_score]
+
+        if acting_player is not None:
+            opp_scores = [s for i, s in enumerate(scores) if i != acting_player]
+            return scores[acting_player], max(opp_scores), winners
+        
+        return max_score, None, winners
+    
+    def _add_score_info(self, timestep: BaseEnvTimestep) -> BaseEnvTimestep:
+        scores = [self._score_grid(g) for g in self.grids]
+        timestep.info['p1_score'] = scores[0]
+        timestep.info['max_score'] = max(scores)
+        timestep.info['avg_score'] = sum(scores) / len(scores)
+        # print('add score info', scores[0], max(scores), sum(scores) / len(scores))
+        return timestep
+    
+    @property
+    def _current_player(self):
+        return self.players[self.current_player_index]
+
+    @property
+    def observation_space(self) -> gym.spaces.Space:
+        return self._observation_space
+
+    @property
+    def action_space(self) -> gym.spaces.Space:
+        return self._action_space
+
+    @property
+    def reward_space(self) -> gym.spaces.Space:
+        return self._reward_space
+
+    def seed(self, seed: int, dynamic_seed: bool = True) -> None:
+        self._seed = seed
+        self._dynamic_seed = dynamic_seed
+        np.random.seed(self._seed)
+
+    def close(self) -> None:
+        pass
+
+    @staticmethod
+    def create_collector_env_cfg(cfg: dict) -> List[dict]:
+        collector_env_num = cfg.pop('collector_env_num')
+        cfg = copy.deepcopy(cfg)
+        cfg.battle_mode = 'self_play_mode'
+        return [cfg for _ in range(collector_env_num)]
+
+    @staticmethod
+    def create_evaluator_env_cfg(cfg: dict) -> List[dict]:
+        evaluator_env_num = cfg.pop('evaluator_env_num')
+        cfg = copy.deepcopy(cfg)
+        cfg.battle_mode = 'eval_mode'
+        return [cfg for _ in range(evaluator_env_num)]
+
+    def __repr__(self) -> str:
+        return "LightZero Gridlock2 Env"
