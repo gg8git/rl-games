@@ -196,4 +196,4 @@ def train_gumbel_muzero(
 
 if __name__ == "__main__":
     main_config, create_config = get_config()
-    train_muzero([main_config, create_config], seed=0, max_env_step=int(2e5))
+    train_gumbel_muzero([main_config, create_config], seed=0, max_env_step=int(2e5))

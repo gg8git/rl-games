@@ -44,25 +44,18 @@ RUN pip install \
     "pettingzoo[classic]" \
     "gymnasium" \
     "numpy>=1.24.1,<2" \
-    "transformers" \
-    "pympler" \
-    "minigrid" \
-    "moviepy" \
+    "tensorboard" \
     "pytest" \
-    "line_profiler" \
-    "xxhash" \
     "einops" \
-    "openai" \
     "nltk" \
     "pyecharts" \
     "numba" \
-    "simple_parsing"
-
-# -----------------------------
-# 3. Clone LightZero and install editable
-# -----------------------------
-RUN git clone https://github.com/opendilab/LightZero.git /opt/LightZero
-RUN pip install -e /opt/LightZero
+    "simple_parsing" \
+    "onnx" \
+    "onnxruntime" \
+    "open_spiel" \
+    "tqdm" \
+    "matplotlib"
 
 # -----------------------------
 # 4. Expose necessary ports
@@ -70,8 +63,8 @@ RUN pip install -e /opt/LightZero
 EXPOSE 6006-6010
 
 
-# docker build -t rl-games:connect-four .
-# docker tag rl-games:connect-four gg8docker0/rl-games:connect_four
-# docker push gg8docker0/cfm-proj:cfm
-# docker pull gg8docker0/cfm-proj:cfm
-# docker run -it --gpus all -v $(pwd):/workspace gg8docker0/rl-games:connect_four
+# docker build -t rl-games:gong_zhu .
+# docker tag rl-games:gong_zhu gg8docker0/rl-games:gong_zhu
+# docker push gg8docker0/rl-games:gong_zhu
+# docker pull gg8docker0/rl-games:gong_zhu
+# docker run -it --gpus all -v $(pwd):/workspace gg8docker0/rl-games:gong_zhu

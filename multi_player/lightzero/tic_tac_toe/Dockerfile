@@ -74,4 +74,4 @@ EXPOSE 6000-6010
 # docker tag rl-games:tictactoe gg8docker0/rl-games:tictactoe
 # docker push gg8docker0/rl-games:tictactoe
 # docker pull gg8docker0/rl-games:tictactoe
-# docker run -it --gpus all -p 6000:6000 -v $(pwd):/workspace gg8docker0/rl-games:tictactoe
+# docker run -it --gpus all -v $(pwd):/workspace gg8docker0/rl-games:tictactoe

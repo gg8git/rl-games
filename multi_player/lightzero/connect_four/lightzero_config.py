@@ -6,19 +6,21 @@ from easydict import EasyDict
 collector_env_num = 12
 n_episode = 12
 evaluator_env_num = 10
-num_simulations = 100
-update_per_collect = 20 # this or replay ratio
-batch_size = 256
-max_env_step = int(2e5)
+num_simulations = 200
+update_per_collect = 20
 reanalyze_ratio = 0.
+batch_size = 256
+max_env_step = int(1e6)
 # ==============================================================
 # end of the most frequently changed config specified by the user
 # ==============================================================
 
-tictactoe_gumbel_muzero_config = dict(
-    exp_name=f'data_gumbel_muzero/tictactoe_bot-play-mode_large',
+connect4_muzero_config = dict(
+    exp_name=f'data_muzero/connect4_bot-play-large',
     env=dict(
         battle_mode='play_with_bot_mode',
+        bot_action_type='rule',
+        channel_last=False,
         collector_env_num=collector_env_num,
         evaluator_env_num=evaluator_env_num,
         n_evaluator_episode=evaluator_env_num,
@@ -26,24 +28,18 @@ tictactoe_gumbel_muzero_config = dict(
     ),
     policy=dict(
         model=dict(
-            observation_shape=(3, 3, 3),
-            action_space_size=9,
+            observation_shape=(3, 6, 7),
+            action_space_size=7,
             image_channel=3,
-            # We use the small size model for tictactoe.
-            num_res_blocks=3,
-            num_channels=16,
-            reward_head_hidden_channels=[8],
-            value_head_hidden_channels=[8],
-            policy_head_hidden_channels=[8],
-            reward_support_range=(-10., 11., 1.),
-            value_support_range=(-10., 11., 1.),
+            num_res_blocks=4,
+            num_channels=64,
+            reward_support_range=(-300., 301., 1.),
+            value_support_range=(-300., 301., 1.),
         ),
-        # (str) The path of the pretrained model. If None, the model will be initialized by the default model.
-        model_path=None,
         cuda=True,
         env_type='board_games',
         action_type='varied_action_space',
-        game_segment_length=9,
+        game_segment_length=int(6 * 7),  # for battle_mode='self_play_mode'
         update_per_collect=update_per_collect,
         batch_size=batch_size,
         optim_type='Adam',
@@ -52,10 +48,8 @@ tictactoe_gumbel_muzero_config = dict(
         grad_clip_value=0.5,
         num_simulations=num_simulations,
         reanalyze_ratio=reanalyze_ratio,
-        max_num_considered_actions=3,
         # NOTE：In board_games, we set large td_steps to make sure the value target is the final outcome.
-        td_steps=9,
-        num_unroll_steps=3,
+        td_steps=int(6 * 7),  # for battle_mode='self_play_mode'
         # NOTE：In board_games, we set discount_factor=1.
         discount_factor=1,
         n_episode=n_episode,
@@ -65,22 +59,24 @@ tictactoe_gumbel_muzero_config = dict(
         evaluator_env_num=evaluator_env_num,
     ),
 )
-tictactoe_gumbel_muzero_config = EasyDict(tictactoe_gumbel_muzero_config)
-main_config = tictactoe_gumbel_muzero_config
+connect4_muzero_config = EasyDict(connect4_muzero_config)
+main_config = connect4_muzero_config
 
-tictactoe_gumbel_muzero_create_config = dict(
+connect4_muzero_create_config = dict(
     env=dict(
-        type='tictactoe',
-        import_names=['zoo.board_games.tictactoe.envs.tictactoe_env'],
+        type='connect4',
+        import_names=['zoo.board_games.connect4.envs.connect4_env'],
     ),
     env_manager=dict(type='subprocess'),
     policy=dict(
-        type='gumbel_muzero',
-        import_names=['lzero.policy.gumbel_muzero'],
+        type='muzero',
+        import_names=['lzero.policy.muzero'],
     ),
 )
-tictactoe_gumbel_muzero_create_config = EasyDict(tictactoe_gumbel_muzero_create_config)
-create_config = tictactoe_gumbel_muzero_create_config
+connect4_muzero_create_config = EasyDict(connect4_muzero_create_config)
+create_config = connect4_muzero_create_config
 
-def get_config():
-    return main_config, create_config
+if __name__ == "__main__":
+    from lzero.entry import train_muzero
+
+    train_muzero([main_config, create_config], seed=1, max_env_step=max_env_step)
