@@ -40,8 +40,10 @@ Pool state
 ──────────
 All commands read/write  <save-dir>/pool_state.json, which stores the agent
 descriptors and the AlphaRank distribution needed to reconstruct the
-PolicyPool across Python sessions.  The belief checkpoint always lives at
-<save-dir>/belief/belief_final.pt and is updated in-place by train-belief.
+PolicyPool across Python sessions. The live belief checkpoint lives at 
+<save-dir>/belief/belief_final.pt and is updated in-place by train-belief.  
+At each add-agent call it is snapshotted to gen_NNN/belief/belief_frozen.pt 
+and that immutable path is recorded in pool_state.json.
 
 Typical manual workflow (with AlphaRank)
 ────────────────────────────────────────
@@ -54,7 +56,7 @@ Typical manual workflow (with AlphaRank)
 
   # <-- inspect psro_runs/gen_NNN/ppo/checkpoints/ -->
 
-  python run_psro.py eval-meta-game  --save-dir psro_runs --n-games 500
+  python run_psro.py eval-meta-game  --save-dir psro_runs --n-games 1000 --adaptive --se-threshold 6.0
   python run_psro.py add-agent       --save-dir psro_runs \\
       --ppo-ckpt psro_runs/gen_001/ppo/checkpoints/ckpt_update_000300.pt
 
@@ -66,6 +68,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import time
 from typing import Optional
 
@@ -84,16 +87,6 @@ def _state_path(save_dir: str) -> str:
 
 
 def _load_pool(save_dir: str, device: str = "cpu") -> tuple[PolicyPool, dict]:
-    """
-    Reconstruct a PolicyPool from pool_state.json and return it alongside
-    the raw state dict (for inspection / re-saving).
-
-    Also restores the AlphaRank distribution if one was previously saved,
-    so opponent sampling is immediately weighted correctly.
-
-    Raises FileNotFoundError if the state file does not exist — run
-    `init` first.
-    """
     path = _state_path(save_dir)
     if not os.path.exists(path):
         raise FileNotFoundError(
@@ -104,10 +97,9 @@ def _load_pool(save_dir: str, device: str = "cpu") -> tuple[PolicyPool, dict]:
     with open(path) as f:
         state = json.load(f)
 
-    # Reconstruct pool without calling __init__ (which auto-inserts a RandomAgent)
     pool = PolicyPool.__new__(PolicyPool)
     pool.population   = []
-    pool.distribution = None   # set below if present in state
+    pool.distribution = None
 
     for entry in state["agents"]:
         if entry["type"] == "RandomAgent":
@@ -121,7 +113,6 @@ def _load_pool(save_dir: str, device: str = "cpu") -> tuple[PolicyPool, dict]:
         else:
             raise ValueError(f"Unknown agent type in pool state: {entry['type']}")
 
-    # Restore AlphaRank distribution if available
     if "alpharank_distribution" in state:
         import numpy as np
         dist = np.array(state["alpharank_distribution"])
@@ -137,15 +128,12 @@ def _load_pool(save_dir: str, device: str = "cpu") -> tuple[PolicyPool, dict]:
 
 
 def _save_pool_state(pool: PolicyPool, state: dict, save_dir: str) -> None:
-    """Serialise the current pool back to pool_state.json."""
     state["pool_size"]  = len(pool)
     state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
 
-    # Persist AlphaRank distribution if one has been set
     if pool.distribution is not None:
         state["alpharank_distribution"] = pool.distribution.tolist()
     else:
-        # Remove stale distribution if pool was reset to uniform
         state.pop("alpharank_distribution", None)
 
     path = _state_path(save_dir)
@@ -154,12 +142,7 @@ def _save_pool_state(pool: PolicyPool, state: dict, save_dir: str) -> None:
     print(f"[PSRO] Pool state saved → {path}")
 
 
-def _append_agent_entry(
-    state:       dict,
-    ppo_path:    str,
-    belief_path: str,
-) -> None:
-    """Append a new PPOAgent descriptor to the in-memory state dict."""
+def _append_agent_entry(state: dict, ppo_path: str, belief_path: str) -> None:
     state.setdefault("agents", []).append({
         "type":        "PPOAgent",
         "ppo_path":    ppo_path,
@@ -180,11 +163,7 @@ def _gen_dir(save_dir: str, gen: int) -> str:
 
 
 def _append_manifest(
-    save_dir:    str,
-    gen:         int,
-    pool:        PolicyPool,
-    ppo_path:    str,
-    belief_path: str,
+    save_dir: str, gen: int, pool: PolicyPool, ppo_path: str, belief_path: str,
 ) -> None:
     path  = os.path.join(save_dir, "pool_manifest.jsonl")
     entry = {
@@ -199,12 +178,49 @@ def _append_manifest(
     print(f"[PSRO] Manifest updated → {path}")
 
 
+def _commit_agent(
+    save_dir:   str,
+    pool:       PolicyPool,
+    state:      dict,
+    ppo_path:   str,
+    belief_src: str,
+    new_gen:    int,
+) -> str:
+    """
+    Snapshot the belief checkpoint, append the new agent to the pool and
+    pool_state.json, clear the stale AlphaRank distribution, and write the
+    manifest.  Returns the frozen belief path.
+
+    Both cmd_add_agent and cmd_run_auto call this — there is no other commit
+    path, so any future change to commit logic only needs to happen here.
+    """
+    frozen_belief_dir  = os.path.join(_gen_dir(save_dir, new_gen), "belief")
+    os.makedirs(frozen_belief_dir, exist_ok=True)
+    frozen_belief_path = os.path.join(frozen_belief_dir, "belief_frozen.pt")
+    shutil.copy2(belief_src, frozen_belief_path)
+    print(
+        f"[PSRO] Belief snapshot: {belief_src}\n"
+        f"       → {frozen_belief_path}  (immutable frozen copy)"
+    )
+
+    state["generation"] = new_gen
+    _append_agent_entry(state, ppo_path, frozen_belief_path)
+    pool.add_policy(ppo_path=ppo_path, belief_path=frozen_belief_path, device="cpu")
+
+    pool.clear_distribution()
+    state.pop("alpharank_distribution", None)
+
+    _save_pool_state(pool, state, save_dir)
+    _append_manifest(save_dir, new_gen, pool, ppo_path, frozen_belief_path)
+
+    return frozen_belief_path
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Subcommand implementations
 # ──────────────────────────────────────────────────────────────────────────────
 
 def cmd_init(args: argparse.Namespace) -> None:
-    """Create a fresh pool state seeded with a single RandomAgent."""
     save_dir = args.save_dir
     os.makedirs(save_dir, exist_ok=True)
 
@@ -232,7 +248,6 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    """Print current pool contents, checkpoint locations, and AlphaRank weights."""
     pool, state = _load_pool(args.save_dir)
     gen         = _current_gen(state)
     ckpt        = _belief_ckpt(args.save_dir)
@@ -255,10 +270,8 @@ def cmd_status(args: argparse.Namespace) -> None:
             print(f"       ppo    : {entry['ppo_path']}  {ppo_ok}")
             print(f"       belief : {entry['belief_path']}  {belief_ok}")
 
-    # Show AlphaRank distribution if available
     if pool.distribution is not None:
-        sampling_label = "AlphaRank"
-        print(f"\n  AlphaRank distribution  ({sampling_label} sampling)")
+        print(f"\n  AlphaRank distribution  (AlphaRank sampling)")
         for i, (agent, w) in enumerate(zip(pool.population, pool.distribution)):
             bar = "█" * max(1, int(w * 30))
             print(f"    [{i}] {type(agent).__name__:<12}  {w:.3f}  {bar}")
@@ -267,7 +280,6 @@ def cmd_status(args: argparse.Namespace) -> None:
 
     print(f"{'─'*60}")
 
-    # Suggest next step
     next_gen    = gen + 1
     gen_ppo_dir = os.path.join(_gen_dir(args.save_dir, next_gen), "ppo", "checkpoints")
     if os.path.isdir(gen_ppo_dir):
@@ -279,7 +291,6 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def cmd_train_belief(args: argparse.Namespace) -> None:
-    """Train / resume the belief network against the current pool."""
     from train_belief_net import train as train_belief
 
     pool, state = _load_pool(args.save_dir, device=args.device or "cpu")
@@ -315,17 +326,10 @@ def cmd_train_belief(args: argparse.Namespace) -> None:
 
 
 def cmd_train_ppo(args: argparse.Namespace) -> None:
-    """
-    Train a PPO best response against the current pool.
-
-    Periodic checkpoints are saved to gen_NNN/ppo/checkpoints/ every 50
-    updates so you can evaluate multiple snapshots from the same run before
-    choosing which one to add.
-    """
     from train_ppo import train_ppo
 
     pool, state = _load_pool(args.save_dir, device=args.device or "cpu")
-    gen         = _current_gen(state) + 1     # this will become gen N+1
+    gen         = _current_gen(state) + 1
     ckpt        = _belief_ckpt(args.save_dir)
     ppo_dir     = os.path.join(_gen_dir(args.save_dir, gen), "ppo")
 
@@ -361,7 +365,7 @@ def cmd_train_ppo(args: argparse.Namespace) -> None:
     print("\n  Evaluate the checkpoints, then commit your chosen one:")
     print(
         f"\n    # (Optional but recommended) Run meta-game eval to update AlphaRank weights:"
-        f"\n    python run_psro.py eval-meta-game --save-dir {args.save_dir}"
+        f"\n    python run_psro.py eval-meta-game --save-dir {args.save_dir} --n-games 1000 --adaptive --se-threshold 6.0"
         f"\n\n    # Commit chosen checkpoint:"
         f"\n    python run_psro.py add-agent --save-dir {args.save_dir} \\\n"
         f"        --ppo-ckpt <path/to/chosen_checkpoint.pt>\n"
@@ -369,58 +373,23 @@ def cmd_train_ppo(args: argparse.Namespace) -> None:
 
 
 def cmd_add_agent(args: argparse.Namespace) -> None:
-    """
-    Register a manually chosen PPO checkpoint into the pool and advance
-    the generation counter.
-
-    The belief checkpoint defaults to the current belief_final.pt, which is
-    the frozen belief model the PPOAgent will carry into future episodes.
-    Pass --belief-ckpt to override (e.g. to lock in an earlier snapshot).
-
-    The AlphaRank distribution is automatically cleared because it was
-    computed over the OLD pool.  Run eval-meta-game after add-agent to
-    recompute it for the updated pool before the next training round.
-    """
-    pool, state = _load_pool(args.save_dir, device="cpu")
-
+    pool, state  = _load_pool(args.save_dir, device="cpu")
     ppo_path     = args.ppo_ckpt
     belief_src   = args.belief_ckpt or _belief_ckpt(args.save_dir)
     new_gen      = _current_gen(state) + 1
-    # belief_path = args.belief_ckpt or _belief_ckpt(args.save_dir)
 
     if not os.path.exists(ppo_path):
         raise FileNotFoundError(f"PPO checkpoint not found: '{ppo_path}'")
     if not os.path.exists(belief_src):
         raise FileNotFoundError(f"Belief checkpoint not found: '{belief_src}'")
 
-    frozen_belief_dir  = os.path.join(_gen_dir(args.save_dir, new_gen), "belief")
-    os.makedirs(frozen_belief_dir, exist_ok=True)
-    frozen_belief_path = os.path.join(frozen_belief_dir, "belief_frozen.pt")
-    shutil.copy2(belief_src, frozen_belief_path)
+    _commit_agent(args.save_dir, pool, state, ppo_path, belief_src, new_gen)
+
+    print(f"\n[PSRO] Generation {new_gen} committed.  Pool: {pool}")
     print(
-        f"[PSRO] Belief snapshot: {belief_src}\n"
-        f"       → {frozen_belief_path}  (immutable frozen copy)"
-    )
-    state["generation"] = new_gen
-
-    _append_agent_entry(state, ppo_path, frozen_belief_path)
-    pool.add_policy(ppo_path=ppo_path, belief_path=frozen_belief_path, device="cpu")
-
-    # The old distribution is now stale — clear it so training falls back to
-    # uniform until eval-meta-game recomputes the AlphaRank weights.
-    pool.clear_distribution()
-    state.pop("alpharank_distribution", None)
-
-    _save_pool_state(pool, state, args.save_dir)
-    _append_manifest(args.save_dir, new_gen, pool, ppo_path, frozen_belief_path)
-
-    print(f"\n[PSRO] Generation {new_gen} committed.")
-    print(f"  Pool : {pool}")
-    print(
-        f"\n  AlphaRank distribution cleared (pool grew).\n"
-        f"  Run eval-meta-game to recompute before the next training round:\n\n"
-        f"    python run_psro.py eval-meta-game --save-dir {args.save_dir}\n"
-        f"\n  Or skip eval and proceed with uniform sampling:\n"
+        f"\n  Run eval-meta-game to recompute AlphaRank weights:\n"
+        f"    python run_psro.py eval-meta-game --save-dir {args.save_dir} --n-games 1000 --adaptive --se-threshold 6.0\n"
+        f"\n  Or skip and proceed with uniform sampling:\n"
         f"    python run_psro.py train-belief --save-dir {args.save_dir}"
     )
 
@@ -430,30 +399,6 @@ def cmd_add_agent(args: argparse.Namespace) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def cmd_eval_meta_game(args: argparse.Namespace) -> None:
-    """
-    Evaluate the current pool's meta-game and compute the AlphaRank
-    meta-Nash distribution.
-
-    What it does
-    ────────────
-    1. Generates all unique 4-agent combos from the pool (with replacement),
-       exploiting GongZhu's symmetry to minimise the number of matchups.
-    2. Simulates --n-games games per matchup to estimate average payoffs.
-    3. Fills the N×N×N×N payoff tensor (backfilled by permutation symmetry).
-    4. Runs OpenSpiel's AlphaRank solver to obtain the meta-Nash distribution.
-    5. Saves the tensor (.npy) and distribution (.json) for inspection.
-    6. Writes the distribution back to pool_state.json so that subsequent
-       train-belief and train-ppo calls sample from it automatically.
-
-    Run this AFTER add-agent (because adding a new agent invalidates the
-    previous distribution) and BEFORE the next train-belief / train-ppo.
-    You can skip it and train with uniform sampling — AlphaRank is optional.
-
-    OpenSpiel
-    ─────────
-    If OpenSpiel is not installed, the command still runs but returns a
-    uniform distribution.  Install with:  pip install open_spiel
-    """
     from eval_meta_game import evaluate as eval_meta
 
     pool, state = _load_pool(args.save_dir, device="cpu")
@@ -463,15 +408,16 @@ def cmd_eval_meta_game(args: argparse.Namespace) -> None:
 
     eval_dir = os.path.join(args.save_dir, f"eval_gen_{gen:03d}")
     distribution = eval_meta(
-        pool        = pool,
-        save_dir    = eval_dir,
-        n_games     = args.n_games,
-        alpha       = args.alpha,
-        master_seed = args.seed,
-        verbose     = True,
+        pool         = pool,
+        save_dir     = eval_dir,
+        n_games      = args.n_games,
+        alpha        = args.alpha,
+        master_seed  = args.seed,
+        adaptive     = args.adaptive,        # ← new
+        se_threshold = args.se_threshold,    # ← new
+        verbose      = True,
     )
 
-    # Store distribution on pool and persist to pool_state.json
     pool.set_distribution(distribution)
     state["alpharank_distribution"] = distribution.tolist()
     _save_pool_state(pool, state, args.save_dir)
@@ -490,19 +436,9 @@ def cmd_eval_meta_game(args: argparse.Namespace) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def cmd_run_auto(args: argparse.Namespace) -> None:
-    """
-    Fully automated PSRO loop — belief → PPO → (eval) → add-agent, N times.
-    Always picks agent_final.pt as the committed checkpoint.
-
-    Pass --skip-eval to disable the AlphaRank evaluation step and use uniform
-    opponent sampling throughout (faster, but no meta-Nash weighting).
-
-    For manual checkpoint selection, use the individual subcommands instead.
-    """
     from train_belief_net import train as train_belief
     from train_ppo import train_ppo
 
-    # Auto-init if the state file doesn't exist yet
     if not os.path.exists(_state_path(args.save_dir)):
         cmd_init(args)
 
@@ -555,20 +491,7 @@ def cmd_run_auto(args: argparse.Namespace) -> None:
         )
 
         # Step 3: commit agent_final.pt
-        # Clear stale distribution first (pool is about to grow)
-        frozen_belief_dir  = os.path.join(_gen_dir(args.save_dir, gen), "belief")
-        os.makedirs(frozen_belief_dir, exist_ok=True)
-        frozen_belief_path = os.path.join(frozen_belief_dir, "belief_frozen.pt")
-        shutil.copy2(ckpt, frozen_belief_path)
-        print(f"[PSRO Gen {gen}] Belief snapshot → {frozen_belief_path}")
-
-        pool.clear_distribution()
-        state.pop("alpharank_distribution", None)
-        state["generation"] = gen
-        _append_agent_entry(state, ppo_final, frozen_belief_path)
-        pool.add_policy(ppo_path=ppo_final, belief_path=frozen_belief_path, device="cpu")
-        _save_pool_state(pool, state, args.save_dir)
-        _append_manifest(args.save_dir, gen, pool, ppo_final, frozen_belief_path)
+        _commit_agent(args.save_dir, pool, state, ppo_final, ckpt, gen)
 
         # Step 4 (optional): AlphaRank evaluation to update sampling weights
         if not args.skip_eval:
@@ -576,11 +499,13 @@ def cmd_run_auto(args: argparse.Namespace) -> None:
             print(f"\n[PSRO Gen {gen}] Meta-game evaluation ({args.eval_n_games} games/matchup)…")
             eval_dir     = os.path.join(args.save_dir, f"eval_gen_{gen:03d}")
             distribution = eval_meta(
-                pool        = pool,
-                save_dir    = eval_dir,
-                n_games     = args.eval_n_games,
-                alpha       = args.eval_alpha,
-                verbose     = True,
+                pool         = pool,
+                save_dir     = eval_dir,
+                n_games      = args.eval_n_games,
+                alpha        = args.eval_alpha,
+                adaptive     = args.eval_adaptive,        # ← new
+                se_threshold = args.eval_se_threshold,    # ← new
+                verbose      = True,
             )
             pool.set_distribution(distribution)
             state["alpharank_distribution"] = distribution.tolist()
@@ -601,28 +526,26 @@ def cmd_run_auto(args: argparse.Namespace) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _add_shared_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--save-dir", type=str, default="psro_runs",
-                   help="Root directory for all checkpoints and logs.")
-    p.add_argument("--device",   type=str, default=None,
-                   help="Torch device ('cuda', 'cpu', or None for auto-detect).")
+    p.add_argument("--save-dir", type=str, default="psro_runs")
+    p.add_argument("--device",   type=str, default=None)
 
 
 def _add_belief_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("belief-net hyperparameters")
-    g.add_argument("--belief-games",            type=int,   default=50_000)
+    g.add_argument("--belief-games",            type=int,   default=10_000)
     g.add_argument("--belief-games-per-loop",   type=int,   default=10)
     g.add_argument("--belief-updates-per-loop", type=int,   default=10)
     g.add_argument("--belief-batch-size",       type=int,   default=256)
     g.add_argument("--belief-lr",               type=float, default=5e-4)
     g.add_argument("--belief-buffer-size",      type=int,   default=100_000)
     g.add_argument("--belief-buffer-warmup",    type=int,   default=10_000)
-    g.add_argument("--belief-save-every",       type=int,   default=5_000)
-    g.add_argument("--belief-log-every",        type=int,   default=500)
+    g.add_argument("--belief-save-every",       type=int,   default=500)
+    g.add_argument("--belief-log-every",        type=int,   default=100)
 
 
 def _add_ppo_args(p: argparse.ArgumentParser) -> None:
     g = p.add_argument_group("ppo hyperparameters")
-    g.add_argument("--ppo-timesteps", type=int,   default=5_000_000)
+    g.add_argument("--ppo-timesteps", type=int,   default=10_000_000)
     g.add_argument("--ppo-num-envs",  type=int,   default=16)
     g.add_argument("--ppo-num-steps", type=int,   default=260)
     g.add_argument("--ppo-lr",        type=float, default=2.5e-4)
@@ -643,7 +566,7 @@ examples:
   # Manual generation cycle (with AlphaRank)
   python run_psro.py train-belief   --save-dir psro_runs
   python run_psro.py train-ppo      --save-dir psro_runs
-  python run_psro.py eval-meta-game --save-dir psro_runs --n-games 500
+  python run_psro.py eval-meta-game --save-dir psro_runs --n-games 1000 --adaptive --se-threshold 6.0
   python run_psro.py add-agent      --save-dir psro_runs \\
       --ppo-ckpt psro_runs/gen_001/ppo/checkpoints/ckpt_update_000300.pt
 
@@ -660,73 +583,60 @@ examples:
     sub = root.add_subparsers(dest="command", required=True)
 
     # init
-    p_init = sub.add_parser("init",
-        help="Create a fresh pool seeded with RandomAgent.")
+    p_init = sub.add_parser("init", help="Create a fresh pool seeded with RandomAgent.")
     _add_shared_args(p_init)
-    p_init.add_argument("--force", action="store_true",
-                        help="Overwrite an existing pool_state.json.")
+    p_init.add_argument("--force", action="store_true")
 
     # status
-    p_status = sub.add_parser("status",
-        help="Print current pool contents and checkpoint paths.")
+    p_status = sub.add_parser("status", help="Print current pool contents and checkpoint paths.")
     _add_shared_args(p_status)
 
     # train-belief
-    p_tb = sub.add_parser("train-belief",
-        help="Train / resume the belief network against the current pool.")
+    p_tb = sub.add_parser("train-belief", help="Train / resume the belief network.")
     _add_shared_args(p_tb)
     _add_belief_args(p_tb)
 
     # train-ppo
-    p_tp = sub.add_parser("train-ppo",
-        help="Train a PPO best response; saves periodic checkpoints for review.")
+    p_tp = sub.add_parser("train-ppo", help="Train a PPO best response; saves periodic checkpoints.")
     _add_shared_args(p_tp)
     _add_ppo_args(p_tp)
 
     # eval-meta-game
-    p_eval = sub.add_parser("eval-meta-game",
-        help="Simulate matchups, build payoff tensor, run AlphaRank.")
+    p_eval = sub.add_parser("eval-meta-game", help="Simulate matchups, build payoff tensor, run AlphaRank.")
     _add_shared_args(p_eval)
-    p_eval.add_argument("--n-games", type=int,   default=1_000,
-                        help="Games simulated per unique 4-agent matchup.")
-    p_eval.add_argument("--alpha",   type=float, default=1e-2,
+    p_eval.add_argument("--n-games",      type=int,   default=1_000,
+                        help="Games per matchup (fixed) or max games (adaptive).")
+    p_eval.add_argument("--alpha",        type=float, default=1e-2,
                         help="AlphaRank temperature (higher = more selective).")
-    p_eval.add_argument("--seed",    type=int,   default=42)
+    p_eval.add_argument("--seed",         type=int,   default=42)
+    p_eval.add_argument("--adaptive",     action="store_true",           # ← new
+                        help="Stop each matchup early when SE drops below --se-threshold.")
+    p_eval.add_argument("--se-threshold", type=float, default=6.0,       # ← new
+                        help="SE target for adaptive stopping (score units).")
 
     # add-agent
-    p_add = sub.add_parser("add-agent",
-        help="Register a chosen PPO checkpoint into the pool after manual eval.")
+    p_add = sub.add_parser("add-agent", help="Register a chosen PPO checkpoint into the pool.")
     _add_shared_args(p_add)
-    p_add.add_argument(
-        "--ppo-ckpt", type=str, required=True,
-        help="Path to the PPO checkpoint you have chosen to add to the pool.",
-    )
-    p_add.add_argument(
-        "--belief-ckpt", type=str, default=None,
-        help=(
-            "Belief checkpoint to freeze into this agent.  "
-            "Defaults to <save-dir>/belief/belief_final.pt."
-        ),
-    )
+    p_add.add_argument("--ppo-ckpt",    type=str, required=True)
+    p_add.add_argument("--belief-ckpt", type=str, default=None)
 
     # run-auto
-    p_auto = sub.add_parser("run-auto",
-        help="Fully automated loop for N generations (always picks agent_final.pt).")
+    p_auto = sub.add_parser("run-auto", help="Fully automated loop for N generations.")
     _add_shared_args(p_auto)
     _add_belief_args(p_auto)
     _add_ppo_args(p_auto)
-    p_auto.add_argument("--num-generations", type=int, default=10,
-                        help="Number of PSRO generations to run.")
-    # AlphaRank eval options for run-auto
-    eval_group = p_auto.add_argument_group(
-        "AlphaRank evaluation (runs after each add-agent step)"
-    )
-    eval_group.add_argument("--skip-eval",   action="store_true",
+    p_auto.add_argument("--num-generations", type=int, default=10)
+
+    eval_group = p_auto.add_argument_group("AlphaRank evaluation (runs after each add-agent step)")
+    eval_group.add_argument("--skip-eval",        action="store_true",
                             help="Skip AlphaRank evaluation; use uniform sampling throughout.")
-    eval_group.add_argument("--eval-n-games", type=int,   default=200,
+    eval_group.add_argument("--eval-n-games",     type=int,   default=200,
                             help="Games per matchup for the automated eval step.")
-    eval_group.add_argument("--eval-alpha",   type=float, default=1e-2,
-                            help="AlphaRank temperature for the automated eval step.")
+    eval_group.add_argument("--eval-alpha",       type=float, default=1e-2)
+    eval_group.add_argument("--eval-adaptive",    action="store_true",   # ← new
+                            help="Use adaptive stopping in automated eval.")
+    eval_group.add_argument("--eval-se-threshold", type=float, default=6.0,  # ← new
+                            help="SE target for adaptive stopping in automated eval.")
 
     return root
 

@@ -104,7 +104,55 @@ def print_trick_winner(env: GongZhuEnv, winner: int, agents: list):
         time.sleep(1.5)
 
 
-def run_simulation(agents: list):
+def get_action_with_probs(agent, env, print_probs=False):
+    """Intercepts the PPOAgent to optionally print its internal EV and Action Probabilities."""
+    # If it's a RandomAgent, it doesn't have a neural network
+    if type(agent).__name__ == "RandomAgent":
+        action = agent(env)
+        if print_probs:
+            print(f"   [Agent Probabilities] RandomAgent playing blindly.")
+        return action
+
+    # 1. Grab the lazy-loaded models
+    ppo_model, belief_model = agent._models
+    
+    # 2. Build the exact observation the bot uses
+    obs_np, snaps, legal_lists = agent._build_obs_batch([(env, env.current_player)])
+    
+    # 3. Run the Belief Network
+    belief_channels = agent._run_batched_belief(belief_model, snaps, agent.device)
+    obs_np[:, 7:10, :] = belief_channels.cpu().numpy()
+    obs_t = torch.from_numpy(obs_np).to(agent.device)
+    
+    # 4. Build the legal action mask
+    masks = np.zeros((1, 52), dtype=np.bool_)
+    masks[0, legal_lists[0]] = True
+    mask_t = torch.from_numpy(masks).to(agent.device)
+    
+    # 5. Extract probabilities and EV
+    with torch.no_grad():
+        logits = ppo_model.actor(obs_t)
+        logits = logits.masked_fill(~mask_t, -1e8)
+        probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
+        
+        value = ppo_model.critic(obs_t)[0].item()
+        action = logits.argmax(dim=-1)[0].item()
+    
+    # 6. Format and print the output if requested
+    if print_probs:
+        from base_env import card_name
+        legal_probs = [(c, probs[c]) for c in legal_lists[0]]
+        legal_probs.sort(key=lambda x: x[1], reverse=True)
+        
+        print(f"\n   [Agent Probabilities] Underlying Expected Value (EV): {value:+.1f} pts")
+        print("   [Agent Probabilities] Top Action Probabilities:")
+        for i, (c, p) in enumerate(legal_probs[:3]):
+            print(f"      {i+1}. {card_name(c):<4} ({p*100:5.1f}%)")
+            
+    return action
+
+
+def run_simulation(agents: list, print_probs: bool = False):
     """Plays a fully simulated game where the environment deals the cards."""
     env = GongZhuEnv()
     env.reset()
@@ -131,7 +179,7 @@ def run_simulation(agents: list):
             print(f"-> You played {card_name(action)}")
 
         else:
-            action = agent(env)
+            action = get_action_with_probs(agent, env, print_probs)
             if "human" in agents: time.sleep(0.8)
             agent_type = "PPO" if "PPO" in type(agent).__name__ else "Random"
             print(f"Player {curr_p} ({agent_type}) plays {card_name(action)}")
@@ -154,7 +202,7 @@ def run_simulation(agents: list):
     print("#"*50)
 
 
-def run_live_play(agents: list):
+def run_live_play(agents: list, print_probs: bool = False):
     """
     Live Physical Play: You distribute cards in the real world. 
     The script hijacks GongZhuEnv, using "Just-In-Time" card injection for human 
@@ -191,7 +239,7 @@ def run_live_play(agents: list):
         print(f"\n--- TRICK {env.trick_num + 1} | POS {len(env.current_trick) + 1}/4 ---")
 
         if agent != "human":
-            action = agent(env)
+            action = get_action_with_probs(agent, env, print_probs)
             agent_type = "PPO" if "PPO" in type(agent).__name__ else "Random"
             print(f">>> BOT {curr_p} ({agent_type}) PLAYS: {card_name(action)} <<<")
         else:
@@ -237,6 +285,14 @@ def resolve_agent(agent_str: str, pool):
                 return pool.population[-1]
         except ValueError:
             return pool.population[-1]
+    if agent_str == "nash":
+        if pool.distribution is None:
+            print("Warning: No AlphaRank distribution found. Defaulting to latest PPO.")
+            return pool.population[-1]
+        chosen_idx = np.random.choice(len(pool.population), p=pool.distribution)
+        gen_type = type(pool.population[chosen_idx]).__name__
+        print(f"[Nash Selection] Bot secretly rolled Gen {chosen_idx} ({gen_type}) for this game.")
+        return pool.population[chosen_idx]
     raise ValueError(f"Unknown agent type: {agent_str}")
 
 
@@ -245,6 +301,7 @@ if __name__ == "__main__":
     parser.add_argument("--save-dir", type=str, default="psro_runs", help="Directory containing pool_state.json")
     parser.add_argument("--players", type=str, default="human,ppo,ppo,ppo", 
                         help="Comma separated list of 4 players (human, random, ppo, ppo_1, etc.)")
+    parser.add_argument("--print-probs", action="store_true", help="Print the bot's internal EV and action probabilities.")
     parser.add_argument("--device", type=str, default=None)
     args = parser.parse_args()
 
@@ -270,8 +327,8 @@ if __name__ == "__main__":
 
     mode = input("\nSelect Mode - [1] Simulation (Auto-dealt) or [2] Live Play (Physical Cards): ")
     if mode.strip() == "1":
-        run_simulation(resolved_agents)
+        run_simulation(resolved_agents, args.print_probs)
     elif mode.strip() == "2":
-        run_live_play(resolved_agents)
+        run_live_play(resolved_agents, args.print_probs)
     else:
         print("Invalid selection. Exiting.")

@@ -105,7 +105,7 @@ class _ModelCache:
     which is single-threaded, so this is fine.
     """
 
-    def __init__(self, capacity: int = 4) -> None:
+    def __init__(self, capacity: int = 5) -> None:
         self.capacity = capacity
         self._cache: OrderedDict[tuple, tuple[nn.Module, nn.Module]] = OrderedDict()
 
@@ -167,7 +167,7 @@ class _ModelCache:
 # Module-level singleton — shared across all PPOAgent instances.
 # Capacity=4: covers 3 opponent slots per episode + 1 spare for newly-sampled
 # agents that haven't been evicted yet.
-_MODEL_CACHE = _ModelCache(capacity=4)
+_MODEL_CACHE = _ModelCache(capacity=8)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
